@@ -1,0 +1,1277 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>DUstToy — Browser Edition</title>
+<style>
+  html, body {
+    margin: 0;
+    padding: 0;
+    background: #111;
+    color: #ddd;
+    font-family: 'Segoe UI', system-ui, sans-serif;
+    height: 100%;
+    overflow: hidden;
+  }
+  #wrap {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    height: 100%;
+    box-sizing: border-box;
+  }
+  #title {
+    padding: 4px 0 2px;
+    font-size: 14px;
+    letter-spacing: 1px;
+    color: #888;
+    flex: 0 0 auto;
+  }
+  #title b { color: #cdb27a; }
+  #stage {
+    flex: 1 1 auto;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: 100%;
+    min-height: 0;
+  }
+  canvas {
+    background: #000;
+    max-width: 100%;
+    max-height: 100%;
+    image-rendering: pixelated;
+    box-shadow: 0 0 24px rgba(0,0,0,0.8);
+    cursor: none;
+  }
+  #hint {
+    flex: 0 0 auto;
+    padding: 3px 0 6px;
+    font-size: 11px;
+    color: #666;
+  }
+  /* ChatSave / ChatLoad modal */
+  #modal {
+    position: fixed;
+    inset: 0;
+    background: rgba(0,0,0,0.7);
+    display: none;
+    align-items: center;
+    justify-content: center;
+    z-index: 10;
+  }
+  #modalBox {
+    background: #1c1c1c;
+    border: 1px solid #444;
+    border-radius: 6px;
+    padding: 16px;
+    width: min(680px, 92vw);
+  }
+  #modalBox h3 { margin: 0 0 8px; color: #cdb27a; font-size: 15px; }
+  #modalBox p { margin: 0 0 8px; font-size: 12px; color: #999; }
+  #modalText {
+    width: 100%;
+    height: 220px;
+    box-sizing: border-box;
+    background: #000;
+    color: #9c9;
+    border: 1px solid #333;
+    font-family: 'Consolas', monospace;
+    font-size: 10px;
+    line-height: 1.05;
+    white-space: pre;
+    resize: vertical;
+  }
+  #modalBtns { margin-top: 10px; display: flex; gap: 8px; justify-content: flex-end; }
+  #modalBtns button {
+    background: #333; color: #ddd; border: 1px solid #555;
+    padding: 6px 14px; border-radius: 4px; cursor: pointer; font-size: 12px;
+  }
+  #modalBtns button:hover { background: #444; }
+</style>
+</head>
+<body>
+<div id="wrap">
+  <div id="title"><b>DUstToy</b> — particle sandbox &nbsp;·&nbsp; a 1:1 browser recreation of the Dual Universe Lua original</div>
+  <div id="stage"><canvas id="c" width="1024" height="612"></canvas></div>
+  <div id="hint">Pen/Paintbrush: click or drag &nbsp;·&nbsp; Line/Circle/Rectangle: click start then click end &nbsp;·&nbsp; pick element from bottom palette &nbsp;·&nbsp; tabs: Tools / Canvas / B.G / Samples</div>
+</div>
+
+<div id="modal">
+  <div id="modalBox">
+    <h3 id="modalTitle">Level Code</h3>
+    <p id="modalDesc"></p>
+    <textarea id="modalText" spellcheck="false"></textarea>
+    <div id="modalBtns">
+      <button id="modalAction"></button>
+      <button id="modalClose">Close</button>
+    </div>
+  </div>
+</div>
+
+<script>
+"use strict";
+
+// ============================================================================
+//  DUstToy — browser recreation
+//  Faithful port of chairpants/DUstToy (Dual Universe Lua screen script).
+//  Same 80x40 grid, element set, colors, physics rules, UI and saved levels.
+// ============================================================================
+
+const canvas = document.getElementById("c");
+const ctx = canvas.getContext("2d");
+
+// --- "screen" resolution (chosen so the bottom UI band sits below the grid) ---
+const rx = 1024;
+const ry = 612;
+const gridWidth = 80;
+const gridHeight = 40;
+const cellSize = Math.min(rx / gridWidth, ry / gridHeight);
+const uiHeight = 100;
+
+// ----------------------------------------------------------------------------
+//  Lightweight emulation of the Dual Universe screen draw API over canvas.
+//  The original used createLayer()/setNextFillColor()/addBox()/addText()...
+//  Draw order here is fixed (grid -> UI -> cursor) to match DU layer stacking.
+// ----------------------------------------------------------------------------
+const AlignH_Left = 0, AlignH_Center = 1;
+let pend = { fill: null, stroke: null, strokeW: 1, align: AlignH_Left, fontSize: 20, shadow: false };
+
+function css(c) { return "rgba(" + Math.round(c[0]*255) + "," + Math.round(c[1]*255) + "," + Math.round(c[2]*255) + "," + (c[3]===undefined?1:c[3]) + ")"; }
+
+function setNextFillColor(r, g, b, a) { pend.fill = [r, g, b, a]; }
+function setNextStrokeColor(r, g, b, a) { pend.stroke = [r, g, b, a]; }
+function setNextStrokeWidth(w) { pend.strokeW = w; }
+function setNextTextAlign(h) { pend.align = h; }
+function setNextShadow() { pend.shadow = true; }
+function resetPend() { pend.fill = null; pend.stroke = null; pend.strokeW = 1; pend.align = AlignH_Left; pend.fontSize = 20; pend.shadow = false; }
+
+function addBox(x, y, w, h) {
+  if (pend.fill) { ctx.fillStyle = css(pend.fill); ctx.fillRect(x, y, w, h); }
+  if (pend.stroke) { ctx.strokeStyle = css(pend.stroke); ctx.lineWidth = pend.strokeW; ctx.strokeRect(x, y, w, h); }
+  resetPend();
+}
+function addLine(x0, y0, x1, y1) {
+  ctx.strokeStyle = css(pend.stroke || [1,1,1,1]);
+  ctx.lineWidth = pend.strokeW;
+  if (pend.shadow) { ctx.shadowColor = "rgba(0,0,0,1)"; ctx.shadowBlur = 5; }
+  ctx.beginPath(); ctx.moveTo(x0, y0); ctx.lineTo(x1, y1); ctx.stroke();
+  ctx.shadowBlur = 0;
+  resetPend();
+}
+function addCircle(x, y, r) {
+  ctx.beginPath(); ctx.arc(x, y, Math.max(0, r), 0, Math.PI * 2);
+  if (pend.fill) { ctx.fillStyle = css(pend.fill); ctx.fill(); }
+  if (pend.stroke) { ctx.strokeStyle = css(pend.stroke); ctx.lineWidth = pend.strokeW; ctx.stroke(); }
+  resetPend();
+}
+function addText(str, x, y) {
+  ctx.fillStyle = css(pend.fill || [1,1,1,1]);
+  ctx.font = pend.fontSize + "px 'Segoe UI', sans-serif";
+  ctx.textAlign = pend.align === AlignH_Center ? "center" : "left";
+  ctx.textBaseline = "alphabetic";
+  ctx.fillText(str, x, y);
+  resetPend();
+}
+
+// ----------------------------------------------------------------------------
+//  Elements (colors/chars identical to the original Lua table)
+//  Grid cells hold *references* to these shared objects, exactly like Lua —
+//  this preserves the original's shared mutable counters (burnCount etc.).
+// ----------------------------------------------------------------------------
+const elements = {
+  None:            { color: [0, 0, 0, 0],            char: "." },
+  Stone:           { color: [0.3, 0.3, 0.3, 1],      char: "O" },
+  Water:           { color: [0, 0, 1, 1],            char: "W", direction: 0 },
+  Fire:            { color: [1, 0, 0, 1],            char: "F", fuelCount: 0 },
+  Sand:            { color: [0.8, 0.7, 0.5, 1],      char: "S" },
+  BurningSand:     { color: [0.9, 0.6, 0.3, 1],      char: "BS", burnCount: 0 },
+  Glass:           { color: [0.7, 0.9, 1, 1],        char: "GS" },
+  Wood:            { color: [0.4, 0.3, 0.1, 1],      char: "D" },
+  Plant:           { color: [0, 1, 0, 1],            char: "P" },
+  Wsrc:            { color: [0, 0, 1, 0.8],          char: "wS" },
+  Ssrc:            { color: [0.8, 0.7, 0.5, 0.8],    char: "sS" },
+  burning_Wood:    { color: [1, 0.5, 0, 1],          char: "d", fuelCount: 0 },
+  burning_Plant:   { color: [1, 0.5, 0, 1],          char: "p", fuelCount: 0 },
+  Coal:            { color: [0.2, 0.2, 0.2, 1],      char: "C" },
+  TNT:             { color: [0.6, 0.6, 0.6, 1],      char: "G", fuelCount: 0 },
+  ignited_TNT:     { color: [1, 1, 0, 1],            char: "g", fuelCount: 0 },
+  Ice:             { color: [0.7, 0.8, 0.96, 1],     char: "I" },
+  Dirt:            { color: [0.37, 0.26, 0.15, 1],   char: "T" },
+  Mud:             { color: [0.19, 0.14, 0.08, 1],   char: "M" },
+  Plastic:         { color: [0.4, 0.0, 0.98, 1],     char: "B" },
+  burning_Plastic: { color: [0.47, 0.13, 0.95, 1],   char: "b", burnCount: 0 },
+  MoltenPlastic:   { color: [0.55, 0.2, 1, 1],       char: "m", coolingCount: 0 },
+};
+
+// Palette shown along the bottom (order from the original)
+const elementNames = ["None", "Stone", "Water", "Wsrc", "Ice", "Fire", "Sand", "Ssrc", "Dirt", "Wood", "Plant", "TNT", "Plastic"];
+const tools = ["Pen", "Paintbrush", "Line", "Circle", "Rectangle"];
+
+// Map a single text character -> element (used by samples & ChatLoad).
+// Extends the original loadMapFromText mapping with codes for Glass/BurningSand
+// so that ChatSave/ChatLoad round-trips every element.
+const charMap = {
+  ".": elements.None,  "O": elements.Stone, "W": elements.Water, "F": elements.Fire,
+  "S": elements.Sand,  "D": elements.Wood,  "P": elements.Plant, "w": elements.Wsrc,
+  "s": elements.Ssrc,  "d": elements.burning_Wood, "p": elements.burning_Plant,
+  "C": elements.Coal,  "G": elements.TNT,   "g": elements.ignited_TNT,
+  "I": elements.Ice,   "T": elements.Dirt,  "M": elements.Mud,   "B": elements.Plastic,
+  "b": elements.burning_Plastic, "m": elements.MoltenPlastic,
+  "X": elements.Glass, "Y": elements.BurningSand,
+};
+// Reverse map element -> single export character (for ChatSave)
+const exportChar = {
+  None: ".", Stone: "O", Water: "W", Fire: "F", Sand: "S", Wood: "D", Plant: "P",
+  Wsrc: "w", Ssrc: "s", burning_Wood: "d", burning_Plant: "p", Coal: "C", TNT: "G",
+  ignited_TNT: "g", Ice: "I", Dirt: "T", Mud: "M", Plastic: "B", burning_Plastic: "b",
+  MoltenPlastic: "m", Glass: "X", BurningSand: "Y",
+};
+function elementKey(el) { for (const k in elements) if (elements[k] === el) return k; return "None"; }
+
+// ----------------------------------------------------------------------------
+//  Saved levels (the five samples from condensed.lua)
+// ----------------------------------------------------------------------------
+const SAMPLES = {};
+SAMPLES.Image1 = `................................................................................
+I...............................................................................
+.......I..............III.................I..........I..............I...........
+............I.....I..IIIII......................................................
+....................IIIIIII.......I........................I................I...
+...I................IIIIIII................................I....................
+.....................IIIII................................I.I...................
+..........I......I....III...............I.....I............I....................
+...I.......................................................I....................
+................................................................................
+.................I.............I..................................I....I........
+...........I..............I.....................................................
+.......................................I........................................
+.....I................I..............................I........................I.
+..................................................................P.............
+.............................................................PP..PP.............
+.............PP...............................................PPP........I......
+............P..PP...............P...........................PPPPTPP.............
+.................P.P.P.....PPP.P.PP........................PP.PDDTPP............
+...............PPTP.P.P....P.PPP...........................P.PPTD...............
+..............P.TPT.........P.D.P..P.........................P...D..............
+.............P...DP...........D.....P..P.........................D..............
+................DD...........D....PP.PPP..P......P...............D..............
+................D............D..P.PPPPPPPP...P..P..P..............D.............
+................D.............D.PPSPPPPPPPPPPPPPPPP..P............D.............
+.................D............DPPPPPSPPSPPSPPPPPPPPPPPP...........D.............
+.................D............PPSSSSSSPSPSSSSSSSPPPPPP...........D..............
+................D............PSPSSSSSSSSSSSSSSSSSSPPPP..........DD..............
+.................D...........SOOSSSSSOSSSSOOSSSSSSSPPPP.........D...............
+.................D.......SSSSOSSOSSSOSOSSOSSOSSSSSSSSSSSS.......D...............
+..................D.....SSSSSSOSSSSSOSOSSSOOSSSSSSSSSSSSSS...S.DD...............
+..................DD..SSSSSSOSSOSSSSOSOSSSSSOSSSSSSSSSSSSSOOSOOS................
+...................D.SSSSSSSSOSOSSSSOSOSOOSSOSSSSSSSSSSSOODGGOOSS...............
+WWWWWWWWWWWWWWWWWWWDSSSSSSSSSSOSSSSSSOSTTTOOSSSSSSSSSSSSOODDDDOOSSWWWWWWW.....W.
+WWWWWWWWWWWWWWWWWSSSSSSSSSSSSSSSSSSSSTTTTTTTTTTSSSSSSSSSSOGGDGOSSSSWWSSWWWWWWWWW
+WWWWWWWWWWWWWWWWSSSSSSSSSSSSSSSTTTTTTTTTTTTTTTTTTTTSSSSSSOOOOOSSSSSSSSSSSSWWWWWW
+WWWWWWSSSWWSSSWSSSSSSSSSSSSTTTTTTTTTTTTTTTTTTTTTTTTTTSSSSSSSSSSSSSSSSSSSSSSWWWWW
+WWWWWMTTTMMTTTSSSSSTTTTTTTTTTTTTTTTTMMMMMMMMTTTTTTTTTTTTTTTTSSSTTTTSSSSSSSSSSWWW
+WWWMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMDDDDDDDDMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMWW
+WWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWTTTDDDDDDDDTTTWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWW`;
+
+SAMPLES.Image2 = `WBPBWBO.SSOOSTTSOOSTOOIIIBGBMMBBBBWBWBWBBBBBBBBBGBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB
+BPBWBP.OOOOOOOIOISTOOGIIIGBMTTMBBWBWBPBBWBWBWBBBCOBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB
+PBPBWBOOTOOTTSOIOIOOIGIOGOMMTMMBWBWBWBBWBWBWBBBBCOBBBBBBBBWBPBPBBBBBBBBWWB.BBBBB
+BWBWBOBTOO.TSOIIIIIIGIGGOGMMMMMBWBWBWBPBPBBBBBBBCOOBBBBBBWBWBPBWBBBBBBWBBWB.B.BB
+WBWBPTTOOTTSOIIIIIIIGIGOGOGMMMBBBWBWBPBPBBBBBBBBCOOBBB.BBBWBWBWBWBWBWBBWWBWB..BB
+BPBPOTTO.TSSIIIIIIIGIGMTOGSOBBBWWBPBPBPBBBBBBBBBCIOOBBBBBWBWBPBWBWBWBWBBBWBB.BBB
+WBWBOTOTTSSIOIIIIIGIGMMMMOTSOBWBBWBWBPBPBBBBBWBWCIOOBBWBWBWBPBPBWBBBBBBBBBWBB.BB
+BWBPOTOSSSOOIIIIIGIGIMMMMOOSOBBWWBWBPBPBBBWBWBWBCIIOOBWBBBBWBPBWBBBBBBBBBWBB.BBB
+PBPBOTOSOOOIOGIIIGGIGTMMSOOOOBWBBWBPBPBBBBBWBWBWCIIOOBBBIIPBWBWBPBBB.BBBBBBBB.BB
+BPBPBSTST.TSIIIGIGIGMTOTOOOOOBBBBPBBPBBBBBWBWOOBCCIOBBOBIIBBBWBBBBBWB.BB...B.BBB
+PBPBOTOTSOOIOIGIGIGMTTO..OOOO.BWPBPBBBBBBBBWBOOBCIIOBBOOIIBBBBIBBBWBWB.......BBB
+BBBBOTOOOOTTIOIGGGMMMOO.OOSO.BWBWPBPBBBBBBIIBOOBCIOBBBOOIIBOBBIBBWBWBBOO.......B
+BBBBOSOOTSOOTIOIOSMTMOO.OOTOBWBWPBBBBBBIBOOIBOOBCIOBBBOOIIBOBBIBWBWBWWOOOOO.OOOB
+BBBBBOOTSOOSTTSOIOOMOOOOSTOBWWBPBBBBBBIIBOOIBOOBIIBBBBOOIIOOBIIWBWBWBWBWBOOOOBSB
+BBSSBOOSOOSTSSOOOMMTMO.OSSBBBWWBBBBBBBIIBOOIBOBBI.BBIIOOIIOOBIIBWWWSSSSSSBWBSSSS
+BSSSSBOOOSTSOOOOMTMTSOOSOBBBBBBBBBBBBBIIBOOIBOBBPBBBIIOOIIOOBIIWBWSSSSSSSSSSSSSS
+SSSSSSBOSTSOOOOOSMOOSOOOOBBBBBBBBBBBBBIIBOOITOTBPBBTIIOOIIOOBIIWSSSSSSSSSSSSSSSS
+SSSSSSSOOOOOOOOOTOOOSOSSSSBBBBBBBBBBBBIIBOOITOTTPTTTIIOOITOOBIISSSSSSSSSSSSSSSSS
+SSSSSSSSSOOOOOOTSOOOSSSSSSSSSSSSSSBBBBIITOOTTOTTPTTTTITOTTOTTIISSSSSSSSSSSSSSSSS
+SSSSSSSSSSSOOOOOOOOOSSSSSSSSSSSSSSSSBTITTOOTTOTTPTTTTTTOTTTTTITSSSSSSSSSSSSSSSSS
+SSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSTTTTTTOOTTTTMPMMMMMMMTTTTTTTTTSSSSSSSSSSSSSSS
+SSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSMMMMMMMMMMMMMM.PWWWWW.W.MMMMMTTTTSSMWWWWWMMMMMT
+WWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWSWWWWWWWWWWWWWWWWWWWWWWWWWWWWMMMMMMTMMMMMTTOTTT
+WMMMMMMWWWWWDMMDMMMDDWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWMMMMMMTTTOTTTTOTTTTTOTTT
+DTTTTTTMMWDDTMTMMMMMTDWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWMTOTOTTTTTTOTTTOTTTTOTTTT
+TT..TTTTTDDTMTMTTTTTMDWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWMTMTTOTOOTOTOTOTOTOTTOTTT
+..OO..TTTTMTMMTMMMMMTTMWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWMMWMOTTTTTT.....OOTOOTOTT
+OOOOOO..TTTMMMTTMTTTTTTMWWWWWWWWWWWMMMMMDDWWWWWWWWWWWWWMMWMMTTTTT..OOGOGO.TTTTTT
+SOSOOOOO.TTMTTTTOTTTMTTTMMMMMWWWWWWMTTTTTTMDWWWWWWWWWWWDWMMWMMTTT.O.OOGOOO.TTTTT
+OSSOSOOO.TM.OTOTTOTTTMTTTTTTTMDDDDMTTTTTTTTTDWWWWWWWWWWDMMWMWWMT.O.O.GOGOOO.TTTT
+SOSSOOOO......TTOTOTOTMTTTTTTTTTTTTTTTTTTTTTTMDDWWWWWWWMMMMMWMMT..O.OOOOOOOOOTTT
+OSOSSSOOOOOOOO...TTTTOTMTTTTTTTTTTTTTTTTTTTTTTTTMDWWWWWWWWMMMMWM...O.OOOOOOOOTTT
+OSSOSOSOSOOSOOOOO..T..TTOTT..O..TTTTT......MMMMMMTOWWWWWWWWWWMMTT.O.OOOOOOOOOTTT
+OSOSOSOSOSOOSOOOOOOSOO.....OOOOO..O..OOOOOOMMMMMTOGOOWWWOOOOOOOOO.OOOOOOOOOOOTTT
+OSSSOSOOSOSSSSOSSOSOSOO.OOOOOOOOOOOOOOOOOOOOOOGOGGOGOOOOOOOOOOOOOO...OOOOOOO.OOT
+SOSOSSSSOSSSSOSOOSOSOSSOOOOOOOOOOOOOOOOOOOOOGGGGOOGOOOOOOOOOOOOOOOOOO.OOO...OOOO
+OSSSOSOOSOOOOOOSSOSSOOOOOOOOOOOOOOOOOOOOOOOOOOGOGOOGGOOOOOOOOOOOOOOOOO...OOOOOOO
+OOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOO
+OOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOO
+OOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOO`;
+
+SAMPLES.Image3 = `..............PPDP.P.PPP..PPP.P..P.PPPPDPPP..P..PPP.............................
+.............PDPPPPPPPPPPPPP.PPPPPPPPDP...PP.PPPDP..PP..........................
+.............PPP.PP.PP.P.PDP.PPPP.P.PDPPPPP.PPP.DPPPPP...................II.....
+...........P.P.DDPPPPPP.DPP.DPPPP.PDPPPPP.PPPP.PPPP.P...................IGGI....
+...........P.PPPPDD.PPPPPPP.PPPPT..P.P.PPPPPP...P.PPPPP................IGGIII...
+............PPPPPPPPP.P..TPPDPDD.T.P.DP.PPP.PPPPP.PP.P.................IGIIGI...
+...........P.P..PDPPPTTT.P.PDDDSDTT.GD.TPPDDT.P.P.PPPPP.................IIGI....
+............PPDPPP..D..TTTT..PDSDTT.G..TTDDDT.PPTPP..PPPP................II.....
+.........P.P.PDP.P.P......TT..PDDTTGDSST.DD.TPT..TPPPPPPD.P......P..............
+........P..PPP..P.D.......TTDDD.SGTTDSSTDDDTTT.....PPT..DPPPP....D..............
+......P..PPPP.PP...........TDDSSDGTTDDSTDDDT..........PPP.P.PDDDP...............
+...........................TDDSSDGGSSSDSDT.T.........P.P......P.................
+............................TDSDSSDTTGDTT.T.....................................
+............................TDDDDDDTDTDTST......................................
+............................TSSSSDSDSTGTST......................................
+............................TTSDDSSDSDSDST......................................
+....GG.......................TDTDGDSDDDDGST.....................................
+...G..G......................TDTDDDTDSTDGDT.....................................
+..I....G.....................TTSDGSTDSTDTTT.....................................
+.I.....G......................TGDDDTDDDGTT......................................
+I.......G.....................TGDGDTDDSSTT......................................
+........G.....................TTDGSDTDDST.......................................
+........G.....................TDSTSDSSDDT.......................................
+.........G....................DGTDDSTDSGT...........................OOOOOOOOOOOO
+.........G....................TDTSDSDDSGD..........................O............
+.........G....................TGTSTSTDDSD.........................BBBBBBBBBBBBBB
+.........D....................TDGTSDSDDDD........................BIIIIIIBBGGGGGB
+.........D...................TTDDSDSDGSDD.......................B.......BBGGGGGG
+..........D..................TTSDGDSDSDGD.......................B.......BBGGGGGG
+..........D..................TSTDSDSDSDGDD.....................BB.D..SSSBBGGGGGG
+..........D..................TSTGDGDSDSDST............BBBBBBBBBBBBBBBBBBBBBBBBBB
+..........D..................TDTGDGDTSDDGT...........IBBBBBBBBBBBBBBBBBBBBBBBBBB
+...........D.................TDTGDDDTTDSGT...........GBB...BBBBBBBBBBBBPBBBBBBBB
+...........D.................TDGTSDSTTDGDST....P.P...BB..O..BBBBBBBBBBBPBBBBBBBB
+...........D.........P......TDSDGDSTTDSDSDT....P.P...O..GOG..BBBBBBBBBBPBBBBBBBB
+...........D.........P....P.TDSDGDDDSSDGSDSTD.P..P..GG.OOGOO.GGGGGGGGGGPGPGGGPBB
+............D....P.P..P...P.TSDGSDDDSDSGDSDTGDP..P...P..GOG..PP...P..P.P.P.P.P..
+............D..P.P..PP.P.PTTSDDGDTTGDSDSDGDTDGP.P..P..P..O..PPP.P.P.PPPPP.PTTP.T
+......WWW...DSPPPPPPPPPPPTTSDDSGTTTTDTDDSDGTSDGDPPPPPPPPTPTPPTPPTPPPPPPPTPPPPPPP
+WWWWWWWWWWWSSSTPTTTTTTTTTTSDDSGTTTTTDTSDSDSGTSTTDTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTT`;
+
+SAMPLES.Image4 = `MwswswswswsMTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTT
+MTTTTTTMTMTMTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTT
+MTGGTTTMMMMMMMMMMMMMMMMMMDDTTTTTTTTTTTTTTMMMTTTTTTMMMMTTTTTTTMMMMMMMTTTTTTTTTTTT
+MTTTGGDTTDPPP............DDMMMMTTTTMMMMMMssTT..MMDMDPDDDD..MMMDDDDDD.....MMTTTTTT
+MMTTTTGGDDDP.............DD....MMMM.PPPPPDDD....PPPDDPP.PPPPPPPP.P......MTTTTTTT
+MTMMTTTTTDPDDD..P.P.PP.P.DD......PPPP....P....PPP.....PPP........PP.PPP...MTTTTT
+MTTTMMMTGDPMMDDPPPPPPPPPPDDDDD...P.......PP..PP...................PPP.PP..MTTTTT
+TMMMMMMMMMMMMMMMMMMMMMMMMMMMTDDPPP........PPPP..MMMMMMMMMMMMMMMMMMMMMMPPP.MTTTTT
+TTTTTTTTTTTTTssDMssMMDMMMTTTTMM............MMTTTTTTTTTTTTTTTTTTTTTTTTTTMP...MTTTT
+TTTTTTTTTTMMDDDDDDDDDDDDTTTMM............MTTTTTTTTTTTTTTTTTTTTTTTTTTTTMPP..MTTTT
+TTTTTMMMMM.DPP....D.....MTTM....MMMMMMMMMTTTTTTTTTTTTTTTTTTTTTTTTTTTTTMP...MTTTT
+TTTMM.....DP......DD.....MTM....MTTTTTTTTsSTTTTTTTTTTTTTTTTTTMMMMTMTMTMPP...MTTTT
+TMM......PD........D......MM....MTTDDDDDDsswsTTTwsssTTTTTTTTTTMMssTTTTPPPPPP....TTTTM
+M.......DD.........DD.....DDD..MTTTDTTTMDDDDDDDDDDDTTT.PPPDDDDDDDDPPPPP...TTTTM.
+M...PPPPD...........D..PPPGGG..MTTTDTTTMTGDP.....PPPPPPP..DD....DD......TTTTMT..
+M..PPMMMMMMMMMMMMMMMMPPM..PDD..MTTDDTTTMTD.PPP..PP........D......D....TTTTMMT...
+M..PMTTTTTwsTTTTTTTTTTTTTMMMPPMMTTDDTTTTMT...PPPP.........D......DMMMMMMMTTT....
+M..PMTTTTTDDDDDDDDDDDDDDDDDDDDDTTDDTTTTMM.....P...MMMMMMMMMMMMMMMMTTTTTTTT......
+M..PMTTTTTDTTTTTTTTTDwsDTTMTDTDDDDDTTTTTM.....PP.MMTTTTTTTTTTTTTTTTTTTTT.........
+M..P.MMMMMDMMMMMMMMMMDDDTMTDTTTTTDTTTTTM......PPMTTTTTTTTTTTTTTTTT..............
+M..PP.....PP..D..........MssDDDTTTDDMssTssT....PPGGTTT..........................
+M...P......PPDD..........MDDGDTTTMDDDDDDDDDDDDDPMTGT............................
+M...PP.......D.......DDD..MDDDTTM.............PPMGTT............................
+M....PPP....DDMMMMMMMM.DDDMTTTMM..............P.MGTTTTTTTTTTTTTTT...............
+M......PPPPDD.MTTTTTTTM..DDMTM..........OOO...P.MTTTTTTTTTTTTTTTTTTTTTTT........
+M........P.D..MTTTTTTTM....MTMDDDG.....OOOO...PPMTTTTTTMMTTTMMMMMMMMMTTTTTTTT...
+TMMMMMMMMDMMMMTTTTTTTTM..DDMTMDDGD.OO..OOOO....PPMTMMMMssTssTssTMMssTssTTTTTTTTTTTT..
+TTTTTTTTMDMTTTTTTTTTTTM.DD.MTD.GDD.OOO.OOOO.....PPPPDDDPDDDDDDPDDDDDDDDDMMTTMTTT
+TTTTTMMMMDMMMMMMMMMssMssTDDDPPPDDDDDDDDMMMMMMM.......DP......P.....PPD......TTMT
+TTTTM....P.........DDDDD..PMMMwSD.DwSDDTTTM..........PD.............DP......MTTT
+TTTM....GDP.GDD.....D.....PMTMWD.DWMDTTTMOO.........PDD.............DDPPP....MTT
+TTM.....DGDPDGD.....D.....PMTMDPPPDTDTTTMOOO.OO......DD.............DD..PPP...MT
+TTM.....DDGPDDG....DD....PPMTTM...MTDTTTMOOO.OO......DD.............DD....PP..MT
+TTM...DGDPDDD.DDG..DD....P.MTM....MTDTT.TMMMMMMMM....DDP............DD.....P..MT
+TTM...DGD.GGGPDGDP.D....PP.MTM....MTDTTTTTTTTTTTTM...DD.............DD....P.P.MT
+TTM...DGD.DDD.GDDPPDPPP.P..MTM....MTDDDDDDTTTTTTTTMM.DD.............DD.....P..MT
+TTTMMMMDMMM.MMMMMMMPPMPPP..MTM....MTTTTTTDTTDDDDDTTTMMD.............DD........MT
+TTTTTTTDTTTMTTTTTTTTTTMMMMMTTM...MTTTTTTDDDDDTTTDTTTTTMMMMMMMMM.....DD....MMMMTT
+TTTTTTTTTTTTTTTTTTTTTTTTTTTTTM...MTTTTTTTTTTTTTTDDDDDDGGGGGGGGGMMMMMMMMMMMTTTTTT
+TTTTTTTTTTTTTTTTTTTTTTTTTTTTTT....TTTTTTTTTTTTTTTTTTDDDDDDDDDDGGGGGGGGTTTTTTTTTT`;
+
+SAMPLES.Image5 = `................................................................................
+....IIIIII.......G..............................................................
+...IIGIIIII..................G.........PPP..............................G.......
+...IIIIIGIII...........................PBP................T.....................
+..IIIIGGIGII...........................PPP........G......TDDDD..................
+..IIIIIGIIII..................G........BBB..............TT.III.......G..........
+..IIGIIGIGII........BPPP...............BBB.............TTD.III..................
+..IGIIGIIIII........BPBP...............BBB.............TTDIIII..................
+...IIIIGIII........BBPPP..........G....PPB............DITDII.................G..
+....GIIIIII........BBBB................PPP......G.....DITDII...G.......G........
+.....GIII.........BBBB.....G..........BBPP...........DIPPBBBBB..................
+..................BBPPB........G......BBB............IIPPPBBBB..................
+.............G...BBBPPP..............BBBB............IIBPDBBBBBBB...............
+.................BBBBPP............PPPBBB............I..TD..BPBBBBBB............
+................BBBB...............PBPBB............II..TD..PPPBBBBBB...........
+...............BBBBB......PPB..BBB.PPPB....BPPP.....I...TD..PPP.PPPBB...........
+....G.........BBPPB.......PPPBBBBBBB.......BPBPBBB..I...TD......PBPBBB..G.......
+.............BBBPPP.......BPPBBBBBBBBB.....BPPPBBBBB....TD......PPPBBB..........
+.............BBBBPP....G..BBBBBBBBBBPPB........BPPPBB...DT...G.....BBB........D.
+.......G.....BBB...............BPPPBPPPBB.......PBPBB...TT.........PBP.......TD.
+.............BBB.....BBBB......BBPP.BPPBB.G.....PPPBB...T..........PBP.......TD.
+............BBPP.....BBBB.....BBBB....BBB..........BBB.............PPP......TTD.
+..........BBBPPP.....BPPB.....BBB.......BBPP.......PPP....D........BBB......TDD.
+..........BBBPPB.....PPP......BBB.......BPPP.......PBPB..D........PPPB.....TTDDC
+..........BBB........PPB......BBC.......BPPBB......PPPB...........PBPB....TTTDOC
+.........BBBB........BBB......BCBB........BBBB......BBB...D.D....BPPPB...TDTDODC
+.........BBBPPB......BBBB...B.BBBBC.......BBBB.......BBB.........BBBB...TDTDODDC
+.........BBBPPP.......CCB..BBCCBBBBC........BB.......BPP........PPPBB..TDTDODDOD
+..........BBBPP......CCCCBBBCCCBBBBBB......CCCB......PBP.......BPBP...TDTDDDDODD
+......WW..BBBBWWW..CCCBCCBCCBBBBBBBBBWWW.CCBCCBWWW...PPBBW...W.BPPPWWW.MMTTMMTTC
+BBBWWBBBBWWWWWBBBBWWWBBBWWWWWBWBWBBWWWWWBWBBBBBBBBBBWWWWBBBBBBWBWWWBBBBW.BCWW.BB
+BBBBBBBWBBBBBBBBWBBWBWBBBBBBBBBBBBBBBBWBBBBBBBWBBBWBBBBBWBBBWBBBBBBBBBBBBBBBBWWB
+BBBBBBBBWWBBWBBWBBBBBBBBBWWBBWWWWBWWWBBBBBWWWBBBBBBWWBWBBBBWWWBBBWBBWWBWWBBWWBBB
+BBBBBBmmmWmWWWWBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBWBB
+BBBBBbbbbbbbbbbmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmm
+BBBBBbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+BBBBBbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+BBBBBbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+bbbbbbbbbbbbbmmmbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF`;
+
+// ----------------------------------------------------------------------------
+//  State
+// ----------------------------------------------------------------------------
+let bgColor = { r: 0, g: 0, b: 0 };
+let grid = [];
+let savedState = null;            // Save/Load snapshot
+let undoStack = [];
+let redoStack = [];
+const maxUndoSteps = 25;
+let fireSpreadCounter = {};
+const fireSpreadDelay = 5;
+let tntBlastRange = 3;
+let TNTDetonationLimit = 50;
+let TNTDetonationCount = 0;
+let TNTCooldown = 0.5;
+let TNTLastDetonationTime = null;
+
+let selectedTab = "Tools";
+let selectedTool = "Pen";
+let selectedElement = elements.Water;
+let fillMode = false;       // filled shapes toggle
+let paintbucket = false;    // flood-fill mode toggle
+
+let startX = null, startY = null;
+let firstClick = false;
+let alternateDirection = false;
+let moved = false;
+let lastTime = now();
+let strokeUndoSaved = false; // ensures one undo entry per pen/brush stroke
+
+// status flashes
+let isSaving = false, isLoading = false, isResetting = false;
+let isUndoing = false, isRedoing = false;
+let saveMessageTime = 0, loadMessageTime = 0;
+
+function now() { return performance.now() / 1000; }
+
+// ----------------------------------------------------------------------------
+//  Grid helpers
+// ----------------------------------------------------------------------------
+function initGrid() {
+  grid = [];
+  fireSpreadCounter = {};
+  for (let y = 1; y <= gridHeight; y++) {
+    grid[y] = [];
+    for (let x = 1; x <= gridWidth; x++) {
+      grid[y][x] = elements.None;
+      fireSpreadCounter[y * gridWidth + x] = 0;
+    }
+  }
+}
+function cloneGrid(src) {
+  const g = [];
+  for (let y = 1; y <= gridHeight; y++) {
+    g[y] = [];
+    for (let x = 1; x <= gridWidth; x++) g[y][x] = src[y][x];
+  }
+  return g;
+}
+function clearGrid() {
+  for (let y = 1; y <= gridHeight; y++) {
+    grid[y] = [];
+    for (let x = 1; x <= gridWidth; x++) {
+      grid[y][x] = elements.None;
+      fireSpreadCounter[y * gridWidth + x] = 0;
+    }
+  }
+  isResetting = false;
+}
+function saveState() {            // Save button
+  savedState = cloneGrid(grid);
+  isSaving = false;
+}
+function loadState() {            // Load button
+  if (savedState) grid = cloneGrid(savedState);
+  isLoading = false;
+}
+function saveCurrentState() {     // push undo
+  undoStack.push(cloneGrid(grid));
+  if (undoStack.length > maxUndoSteps) undoStack.shift();
+  redoStack = [];
+}
+function undo() {
+  if (undoStack.length > 0) {
+    const state = undoStack.pop();
+    redoStack.push(grid);
+    grid = state;
+  }
+  isUndoing = false;
+}
+function redo() {
+  if (redoStack.length > 0) {
+    const state = redoStack.pop();
+    undoStack.push(grid);
+    grid = state;
+  }
+  isRedoing = false;
+}
+
+// ----------------------------------------------------------------------------
+//  Level text <-> grid (samples, ChatSave/ChatLoad)
+// ----------------------------------------------------------------------------
+function loadMapFromText(mapText) {
+  const rows = mapText.split("\n").filter(l => l.length > 0);
+  for (let y = 1; y <= rows.length && y <= gridHeight; y++) {
+    const line = rows[y - 1];
+    for (let x = 1; x <= line.length && x <= gridWidth; x++) {
+      const ch = line.charAt(x - 1);
+      if (charMap[ch]) grid[y][x] = charMap[ch];
+    }
+  }
+}
+function gridToText() {
+  let out = [];
+  for (let y = 1; y <= gridHeight; y++) {
+    let row = "";
+    for (let x = 1; x <= gridWidth; x++) row += exportChar[elementKey(grid[y][x])] || ".";
+    out.push(row);
+  }
+  return out.join("\n");
+}
+
+// ----------------------------------------------------------------------------
+//  Drawing tools
+// ----------------------------------------------------------------------------
+function drawLineCells(x0, y0, x1, y1, element) {  // Bresenham in pixel space
+  const dx = Math.abs(x1 - x0);
+  const dy = Math.abs(y1 - y0);
+  const sx = x0 < x1 ? 1 : -1;
+  const sy = y0 < y1 ? 1 : -1;
+  let err = dx - dy;
+  while (true) {
+    const gx = Math.floor(x0 / cellSize) + 1;
+    const gy = Math.floor(y0 / cellSize) + 1;
+    if (gx >= 1 && gx <= gridWidth && gy >= 1 && gy <= gridHeight) grid[gy][gx] = element;
+    if (x0 === x1 && y0 === y1) break;
+    const e2 = 2 * err;
+    if (e2 > -dy) { err -= dy; x0 += sx; }
+    if (e2 < dx) { err += dx; y0 += sy; }
+  }
+}
+function plotRectanglePoints(x0, y0, x1, y1, element) {
+  const minX = Math.min(x0, x1), maxX = Math.max(x0, x1);
+  const minY = Math.min(y0, y1), maxY = Math.max(y0, y1);
+  for (let y = minY; y <= maxY; y++)
+    for (let x = minX; x <= maxX; x++)
+      if (fillMode || y === minY || y === maxY || x === minX || x === maxX)
+        if (grid[y] && grid[y][x]) grid[y][x] = element;
+}
+function drawRectangle(x1, y1, x2, y2) {
+  const gx1 = Math.floor(x1 / cellSize) + 1, gy1 = Math.floor(y1 / cellSize) + 1;
+  const gx2 = Math.floor(x2 / cellSize) + 1, gy2 = Math.floor(y2 / cellSize) + 1;
+  plotRectanglePoints(gx1, gy1, gx2, gy2, selectedElement);
+}
+function plotCirclePoints(cx, cy, x, y, element) {
+  const pts = [
+    [cx+x, cy+y], [cx-x, cy+y], [cx+x, cy-y], [cx-x, cy-y],
+    [cx+y, cy+x], [cx-y, cy+x], [cx+y, cy-x], [cx-y, cy-x],
+  ];
+  for (const p of pts) {
+    const gx = Math.floor(p[0] / cellSize) + 1, gy = Math.floor(p[1] / cellSize) + 1;
+    if (gx >= 1 && gx <= gridWidth && gy >= 1 && gy <= gridHeight) grid[gy][gx] = element;
+  }
+}
+function drawFilledCircle(cx, cy, radius, element) {
+  const minX = Math.max(Math.floor((cx - radius) / cellSize) + 1, 1);
+  const maxX = Math.min(Math.floor((cx + radius) / cellSize) + 1, gridWidth);
+  const minY = Math.max(Math.floor((cy - radius) / cellSize) + 1, 1);
+  const maxY = Math.min(Math.floor((cy + radius) / cellSize) + 1, gridHeight);
+  for (let gy = minY; gy <= maxY; gy++)
+    for (let gx = minX; gx <= maxX; gx++) {
+      const px = (gx - 1) * cellSize + cellSize / 2;
+      const py = (gy - 1) * cellSize + cellSize / 2;
+      if ((px - cx) ** 2 + (py - cy) ** 2 <= radius ** 2) grid[gy][gx] = element;
+    }
+}
+function drawCircle(cx, cy, radius) {
+  if (fillMode) { drawFilledCircle(cx, cy, radius, selectedElement); return; }
+  let x = radius, y = 0, d = 1 - x;
+  while (y <= x) {
+    plotCirclePoints(cx, cy, x, y, selectedElement);
+    plotCirclePoints(cx, cy, y, x, selectedElement);
+    y++;
+    if (d <= 0) d += 2 * y + 1;
+    else { x--; d += 2 * (y - x) + 1; }
+  }
+}
+function floodFill(px, py, target, replacement) {  // iterative 4-connected
+  if (target.char === replacement.char) return;
+  let sx = Math.floor(px / cellSize) + 1, sy = Math.floor(py / cellSize) + 1;
+  if (sx < 1 || sx > gridWidth || sy < 1 || sy > gridHeight) return;
+  if (grid[sy][sx].char !== target.char) return;
+  const stack = [[sx, sy]];
+  while (stack.length) {
+    const [x, y] = stack.pop();
+    if (x < 1 || x > gridWidth || y < 1 || y > gridHeight) continue;
+    if (grid[y][x].char !== target.char || grid[y][x].char === replacement.char) continue;
+    grid[y][x] = replacement;
+    stack.push([x - 1, y], [x + 1, y], [x, y - 1], [x, y + 1]);
+  }
+}
+function placeElement(x, y) {
+  const gridX = Math.floor(x / cellSize) + 1;
+  const gridY = Math.floor(y / cellSize) + 1;
+  if (gridX >= 1 && gridX <= gridWidth && gridY >= 1 && gridY <= gridHeight) {
+    if (selectedTool === "Pen") {
+      grid[gridY][gridX] = selectedElement;
+    } else if (selectedTool === "Paintbrush") {
+      for (let i = -1; i <= 1; i++)
+        for (let j = -1; j <= 1; j++)
+          if (gridY + i >= 1 && gridY + i <= gridHeight && gridX + j >= 1 && gridX + j <= gridWidth)
+            grid[gridY + i][gridX + j] = selectedElement;
+    } else if (selectedTool === "Line" && firstClick) {
+      drawLineCells(Math.floor(startX), Math.floor(startY), Math.floor(x), Math.floor(y), selectedElement);
+      firstClick = false;
+    } else if (selectedTool === "Circle" && firstClick) {
+      drawCircle(startX, startY, Math.sqrt((x - startX) ** 2 + (y - startY) ** 2));
+      firstClick = false;
+    } else if (selectedTool === "Rectangle" && firstClick) {
+      drawRectangle(startX, startY, x, y);
+      firstClick = false;
+    }
+  }
+}
+
+// ----------------------------------------------------------------------------
+//  TNT explosion (faithful port of igniteTNT)
+// ----------------------------------------------------------------------------
+function igniteTNT(y0, x0) {
+  const tntQueue = [[y0, x0]];
+  const visited = {};
+  while (tntQueue.length > 0) {
+    const current = tntQueue.shift();
+    const cy = current[0], cx = current[1];
+    visited[cy * gridWidth + cx] = true;
+    const neighbors = [
+      [cy+1,cx],[cy-1,cx],[cy,cx+1],[cy,cx-1],
+      [cy+1,cx+1],[cy+1,cx-1],[cy-1,cx+1],[cy-1,cx-1],
+    ];
+    for (const nb of neighbors) {
+      const ny = nb[0], nx = nb[1];
+      if (ny >= 1 && ny <= gridHeight && nx >= 1 && nx <= gridWidth) {
+        const ne = grid[ny][nx];
+        if (ne.char === "G" && !visited[ny * gridWidth + nx]) {
+          tntQueue.push([ny, nx]);
+          visited[ny * gridWidth + nx] = true;
+        } else if (ne.char !== "O") {
+          grid[ny][nx] = elements.None;
+        }
+        if (ne.char === "D") grid[ny][nx] = elements.burning_Wood;
+        else if (ne.char === "P") grid[ny][nx] = elements.burning_Plant;
+        else if (ne.char === "G") grid[ny][nx] = elements.ignited_TNT;
+        else if (ne.char === "S") grid[ny][nx] = elements.Glass;
+      }
+    }
+    for (let dy = -tntBlastRange; dy <= tntBlastRange; dy++) {
+      for (let dx = -tntBlastRange; dx <= tntBlastRange; dx++) {
+        const nx = cx + dx, ny = cy + dy;
+        if (nx >= 1 && nx <= gridWidth && ny >= 1 && ny <= gridHeight) {
+          const ne = grid[ny][nx];
+          const dist = Math.sqrt(dx * dx + dy * dy);
+          if (dist <= tntBlastRange) {
+            if (ne.char === "S") grid[ny][nx] = elements.Glass;
+            else if (ne.char === "C") {
+              const bx = nx + Math.floor(dx / dist);
+              const by = ny + Math.floor(dy / dist);
+              if (bx >= 1 && bx <= gridWidth && by >= 1 && by <= gridHeight) {
+                grid[ny][nx] = elements.None;
+                grid[by][bx] = ne;
+              }
+            } else if (ne.char === "W") grid[ny][nx] = elements.None;
+            else if (ne.char === "D" || ne.char === "P")
+              grid[ny][nx] = dist <= tntBlastRange / 2 ? elements.burning_Wood : elements.burning_Plant;
+            else if (ne.char === "B")
+              grid[ny][nx] = dist <= tntBlastRange / 2 ? elements.MoltenPlastic : elements.burning_Plastic;
+          }
+        }
+      }
+    }
+    grid[cy][cx] = elements.None;
+  }
+}
+
+// ----------------------------------------------------------------------------
+//  Physics step (faithful port of simulate)
+// ----------------------------------------------------------------------------
+function moveElement(x, y, tx, ty) {
+  grid[ty][tx] = grid[y][x];
+  grid[y][x] = elements.None;
+  moved = true;
+}
+function simulate() {
+  if (TNTLastDetonationTime !== null && now() - TNTLastDetonationTime > TNTCooldown) TNTDetonationCount = 0;
+  for (let y = gridHeight - 1; y >= 1; y--) {
+    for (let x = 1; x <= gridWidth; x++) {
+      const element = grid[y][x];
+      if (element.char === "S" || element.char === "C") {
+        const flowDown = y < gridHeight && grid[y+1][x].char === ".";
+        const flowLeft = x > 1 && grid[y+1][x-1].char === ".";
+        const flowRight = x < gridWidth && grid[y+1][x+1].char === ".";
+        if (flowDown) moveElement(x, y, x, y+1);
+        else if (flowLeft && flowRight) {
+          if (alternateDirection) moveElement(x, y, x-1, y+1);
+          else moveElement(x, y, x+1, y+1);
+          alternateDirection = !alternateDirection;
+        } else if (flowLeft) moveElement(x, y, x-1, y+1);
+        else if (flowRight) moveElement(x, y, x+1, y+1);
+      } else if (element.char === "wS") {
+        if (y < gridHeight && grid[y+1][x].char === ".") { grid[y+1][x] = elements.Water; moved = true; }
+      } else if (element.char === "sS") {
+        if (y < gridHeight && grid[y+1][x].char === ".") { grid[y+1][x] = elements.Sand; moved = true; }
+      } else if (element.char === "W") {
+        const flowDown = y < gridHeight && grid[y+1][x].char === ".";
+        const flowLeft = x > 1 && grid[y][x-1].char === ".";
+        const flowRight = x < gridWidth && grid[y][x+1].char === ".";
+        const flowDL = y < gridHeight && x > 1 && grid[y+1][x-1].char === ".";
+        const flowDR = y < gridHeight && x < gridWidth && grid[y+1][x+1].char === ".";
+        if (flowDown) { moveElement(x, y, x, y+1); grid[y+1][x].direction = element.direction; }
+        else if (flowLeft && flowRight) {
+          if (element.direction === 0) { element.direction = alternateDirection ? -1 : 1; alternateDirection = !alternateDirection; }
+          if (element.direction === -1) { moveElement(x, y, x-1, y); grid[y][x-1].direction = element.direction; }
+          else { moveElement(x, y, x+1, y); grid[y][x+1].direction = element.direction; }
+        } else if (flowLeft) { moveElement(x, y, x-1, y); grid[y][x-1].direction = -1; }
+        else if (flowRight) { moveElement(x, y, x+1, y); grid[y][x+1].direction = 1; }
+        else if (flowDL) { moveElement(x, y, x-1, y+1); grid[y+1][x-1].direction = -1; }
+        else if (flowDR) { moveElement(x, y, x+1, y+1); grid[y+1][x+1].direction = 1; }
+      } else if (element.char === "B") {
+        const neighbors = [[y+1,x],[y-1,x],[y,x+1],[y,x-1]];
+        for (const nb of neighbors) {
+          const ny = nb[0], nx = nb[1];
+          if (ny >= 1 && ny <= gridHeight && nx >= 1 && nx <= gridWidth)
+            if (grid[ny][nx].char === "F") { grid[y][x] = elements.burning_Plastic; grid[y][x].burnCount = 0; moved = true; }
+        }
+      } else if (element.char === "b") {
+        element.burnCount++;
+        if (element.burnCount >= 5) { grid[y][x] = elements.MoltenPlastic; grid[y][x].coolingCount = 0; moved = true; }
+        else {
+          const neighbors = [[y+1,x],[y-1,x],[y,x+1],[y,x-1]];
+          for (const nb of neighbors) {
+            const ny = nb[0], nx = nb[1];
+            if (ny >= 1 && ny <= gridHeight && nx >= 1 && nx <= gridWidth) {
+              const ne = grid[ny][nx];
+              if (ne.char === "D") { grid[ny][nx] = elements.burning_Wood; grid[ny][nx].fuelCount = 0; moved = true; }
+              else if (ne.char === "P") { grid[ny][nx] = elements.burning_Plant; grid[ny][nx].fuelCount = 0; moved = true; }
+              else if (ne.char === "B") { grid[ny][nx] = elements.burning_Plastic; grid[ny][nx].burnCount = 0; moved = true; }
+            }
+          }
+        }
+      } else if (element.char === "m") {
+        element.coolingCount++;
+        if (element.coolingCount >= 10) { grid[y][x] = elements.Plastic; moved = true; }
+        else {
+          const flowDown = y < gridHeight && grid[y+1][x].char === ".";
+          const flowLeft = x > 1 && grid[y+1][x-1].char === ".";
+          const flowRight = x < gridWidth && grid[y+1][x+1].char === ".";
+          if (flowDown) { moveElement(x, y, x, y+1); grid[y+1][x].coolingCount = element.coolingCount; }
+          else if (flowLeft && flowRight) {
+            if (alternateDirection) { moveElement(x, y, x-1, y+1); grid[y+1][x-1].coolingCount = element.coolingCount; }
+            else { moveElement(x, y, x+1, y+1); grid[y+1][x+1].coolingCount = element.coolingCount; }
+            alternateDirection = !alternateDirection;
+          } else if (flowLeft) { moveElement(x, y, x-1, y+1); grid[y+1][x-1].coolingCount = element.coolingCount; }
+          else if (flowRight) { moveElement(x, y, x+1, y+1); grid[y+1][x+1].coolingCount = element.coolingCount; }
+        }
+      } else if (element.char === "S") {            // (unreachable, kept for parity)
+        const neighbors = [[y+1,x],[y-1,x],[y,x+1],[y,x-1]];
+        for (const nb of neighbors) {
+          const ny = nb[0], nx = nb[1];
+          if (ny >= 1 && ny <= gridHeight && nx >= 1 && nx <= gridWidth)
+            if (grid[ny][nx].char === "F") { grid[y][x] = elements.BurningSand; grid[y][x].burnCount = 0; moved = true; }
+        }
+      } else if (element.char === "BS") {
+        element.burnCount++;
+        if (element.burnCount >= 10) { grid[y][x] = elements.Glass; moved = true; }
+      } else if (element.char === "GS") {
+        const neighbors = [[y+1,x],[y-1,x],[y,x+1],[y,x-1]];
+        for (const nb of neighbors) {
+          const ny = nb[0], nx = nb[1];
+          if (ny >= 1 && ny <= gridHeight && nx >= 1 && nx <= gridWidth) {
+            const ne = grid[ny][nx];
+            if (ne.char === "p" || ne.char === "b" || ne.char === "d") {
+              if (TNTDetonationCount < TNTDetonationLimit || (TNTLastDetonationTime !== null && now() - TNTLastDetonationTime > TNTCooldown)) {
+                TNTDetonationCount++;
+                igniteTNT(y, x);
+                TNTLastDetonationTime = now();
+              }
+              grid[y][x].burnCount = 0;
+              moved = true;
+            }
+          }
+        }
+      } else if (element.char === "T") {
+        const neighbors = [[y+1,x],[y-1,x],[y,x+1],[y,x-1]];
+        for (const nb of neighbors) {
+          const ny = nb[0], nx = nb[1];
+          if (ny >= 1 && ny <= gridHeight && nx >= 1 && nx <= gridWidth)
+            if (grid[ny][nx].char === "W") { grid[y][x] = elements.Mud; grid[ny][nx] = elements.None; moved = true; break; }
+        }
+      } else if (element.char === "M") {
+        const neighbors = [[y+1,x],[y-1,x],[y,x+1],[y,x-1]];
+        for (const nb of neighbors) {
+          const ny = nb[0], nx = nb[1];
+          if (ny >= 1 && ny <= gridHeight && nx >= 1 && nx <= gridWidth)
+            if (grid[ny][nx].char === "F") { grid[y][x] = elements.Dirt; moved = true; break; }
+        }
+      } else if (element.char === "F") {
+        const index = y * gridWidth + x;
+        fireSpreadCounter[index] = (fireSpreadCounter[index] || 0) + 1;
+        if (fireSpreadCounter[index] >= fireSpreadDelay) {
+          fireSpreadCounter[index] = 0;
+          const neighbors = [[y+1,x],[y-1,x],[y,x+1],[y,x-1]];
+          let hasFuel = false;
+          for (const nb of neighbors) {
+            const ny = nb[0], nx = nb[1];
+            if (ny >= 1 && ny <= gridHeight && nx >= 1 && nx <= gridWidth) {
+              const ne = grid[ny][nx];
+              if (ne.char === "W") { grid[y][x] = elements.None; moved = true; }
+              else if (ne.char === "D") { grid[ny][nx] = elements.burning_Wood; grid[ny][nx].fuelCount = 0; moved = true; hasFuel = true; }
+              else if (ne.char === "P") { grid[ny][nx] = elements.burning_Plant; grid[ny][nx].fuelCount = 0; moved = true; hasFuel = true; }
+              else if (ne.char === "B") { grid[ny][nx] = elements.burning_Plastic; grid[ny][nx].burnCount = 0; moved = true; hasFuel = true; }
+              else if (ne.char === "G") { igniteTNT(ny, nx); moved = true; hasFuel = true; }
+            }
+          }
+          if (!hasFuel) {
+            grid[y][x].fuelCount = (grid[y][x].fuelCount || 0) + 1;
+            if (grid[y][x].fuelCount >= fireSpreadDelay * 2) { grid[y][x] = elements.None; moved = true; }
+          }
+        }
+      } else if (element.char === "d" || element.char === "p") {
+        const index = y * gridWidth + x;
+        fireSpreadCounter[index] = fireSpreadCounter[index] + 1;
+        if (fireSpreadCounter[index] >= fireSpreadDelay) {
+          const neighbors = [[y+1,x],[y-1,x],[y,x+1],[y,x-1]];
+          for (const nb of neighbors) {
+            const ny = nb[0], nx = nb[1];
+            if (ny >= 1 && ny <= gridHeight && nx >= 1 && nx <= gridWidth) {
+              const ne = grid[ny][nx];
+              if (ne.char === "W") { grid[y][x] = elements.None; moved = true; }
+              else if (ne.char === "D") { grid[ny][nx] = elements.burning_Wood; moved = true; }
+              else if (ne.char === "P") { grid[ny][nx] = elements.burning_Plant; moved = true; }
+              else if (ne.char === "G") { igniteTNT(ny, nx); moved = true; }
+            }
+          }
+        }
+        if (fireSpreadCounter[index] >= fireSpreadDelay * 2) { grid[y][x] = elements.Coal; fireSpreadCounter[index] = 0; moved = true; }
+      } else if (element.char === "g") {
+        const neighbors = [
+          [y+1,x],[y-1,x],[y,x+1],[y,x-1],
+          [y+1,x+1],[y+1,x-1],[y-1,x+1],[y-1,x-1],
+        ];
+        for (const nb of neighbors) {
+          const ny = nb[0], nx = nb[1];
+          if (ny >= 1 && ny <= gridHeight && nx >= 1 && nx <= gridWidth) {
+            const ne = grid[ny][nx];
+            if (ne.char !== "O") grid[ny][nx] = elements.None;
+            if (ne.char === "D") grid[ny][nx] = elements.burning_Wood;
+            else if (ne.char === "P") grid[ny][nx] = elements.burning_Plant;
+            else if (ne.char === "G") grid[ny][nx] = elements.ignited_TNT;
+            else if (ne.char === "S") grid[ny][nx] = elements.Glass;
+          }
+        }
+        for (let dy = -tntBlastRange; dy <= tntBlastRange; dy++) {
+          for (let dx = -tntBlastRange; dx <= tntBlastRange; dx++) {
+            const nx = x + dx, ny = y + dy;
+            if (nx >= 1 && nx <= gridWidth && ny >= 1 && ny <= gridHeight) {
+              const ne = grid[ny][nx];
+              const dist = Math.sqrt(dx * dx + dy * dy);
+              if (dist <= tntBlastRange) {
+                if (ne.char === "S") grid[ny][nx] = elements.Glass;
+                else if (ne.char === "C") {
+                  const bx = nx + Math.floor(dx / dist);
+                  const by = ny + Math.floor(dy / dist);
+                  if (bx >= 1 && bx <= gridWidth && by >= 1 && by <= gridHeight) { grid[ny][nx] = elements.None; grid[by][bx] = ne; }
+                } else if (ne.char === "W") grid[ny][nx] = elements.None;
+                else if (ne.char === "D" || ne.char === "P")
+                  grid[ny][nx] = dist <= tntBlastRange / 2 ? elements.burning_Wood : elements.burning_Plant;
+                else if (ne.char === "B")
+                  grid[ny][nx] = dist <= tntBlastRange / 2 ? elements.MoltenPlastic : elements.burning_Plastic;
+              }
+            }
+          }
+        }
+        grid[y][x] = elements.None;
+      }
+    }
+  }
+}
+
+// ----------------------------------------------------------------------------
+//  Rendering
+// ----------------------------------------------------------------------------
+function drawGrid() {
+  for (let y = 1; y <= gridHeight; y++) {
+    for (let x = 1; x <= gridWidth; x++) {
+      const element = grid[y][x];
+      if (element.char === ".") ctx.fillStyle = css([bgColor.r, bgColor.g, bgColor.b, 1]);
+      else ctx.fillStyle = css(element.color);
+      ctx.fillRect((x - 1) * cellSize, (y - 1) * cellSize, cellSize + 0.5, cellSize + 0.5);
+    }
+  }
+}
+function drawCursor(x, y) {
+  if (x < 0) return;
+  const half = 7.5;
+  function bracket(x0, y0, x1, y1) {
+    setNextShadow(); setNextStrokeColor(1, 1, 1, 1); setNextStrokeWidth(1); addLine(x0, y0, x1, y1);
+  }
+  bracket(x-half, y-half, x-half+5, y-half);
+  bracket(x-half, y-half, x-half, y-half+5);
+  bracket(x+half, y-half, x+half-5, y-half);
+  bracket(x+half, y-half, x+half, y-half+5);
+  bracket(x-half, y+half, x-half+5, y+half);
+  bracket(x-half, y+half, x-half, y+half-5);
+  bracket(x+half, y+half, x+half-5, y+half);
+  bracket(x+half, y+half, x+half, y+half-5);
+}
+function drawRCostBar() {
+  const bW = 6, bH = ry, bX = rx - bW, bY = 0;
+  setNextFillColor(0.2, 0.2, 0.2, 1); addBox(bX, bY, bW, bH);
+  const fH = 0.1 * bH;
+  setNextFillColor(0.0, 0.8, 0.0, 1); addBox(bX, bY + bH - fH, bW, fH);
+}
+function drawPreview() {
+  const m = getCursor();
+  if (m.x > 0 && m.y > 0 && firstClick) {
+    if (selectedTool === "Line") {
+      setNextStrokeColor(1,1,1,1); setNextStrokeWidth(1); addLine(startX, startY, m.x, m.y);
+    } else if (selectedTool === "Circle") {
+      const r = Math.sqrt((m.x - startX) ** 2 + (m.y - startY) ** 2);
+      setNextStrokeColor(1,1,1,1); setNextStrokeWidth(1); addCircle(startX, startY, r);
+    } else if (selectedTool === "Rectangle") {
+      setNextStrokeColor(1,1,1,1); setNextStrokeWidth(1); addBox(startX, startY, m.x - startX, m.y - startY);
+    }
+  }
+}
+function drawUI() {
+  function addStyle() { setNextFillColor(1, 1, 1, 1); }
+  const paletteHeight = 20;
+
+  // bottom panel background
+  setNextFillColor(0.1, 0.1, 0.1, 1); addBox(0, ry - uiHeight, rx, uiHeight);
+
+  // element palette (bottom strip)
+  const buttonWidth = rx / elementNames.length;
+  for (let i = 0; i < elementNames.length; i++) {
+    const element = elements[elementNames[i]];
+    if (element.char === selectedElement.char) {
+      setNextStrokeColor(1, 0, 0, 1); setNextStrokeWidth(2);
+      addLine(i * buttonWidth, ry - paletteHeight, i * buttonWidth + buttonWidth, ry - paletteHeight);
+    }
+    setNextFillColor(element.color[0], element.color[1], element.color[2], element.color[3]);
+    addBox(i * buttonWidth, ry - paletteHeight, buttonWidth, paletteHeight);
+    addStyle(); addText(elementNames[i], i * buttonWidth + 10, ry - paletteHeight / 2 + 5);
+  }
+
+  // tabs
+  const tabOptions = ["Tools", "Canvas", "B.G", "Samples"];
+  const tabColors = { "Tools": [0.8,0.2,0.2,1], "Canvas": [0.2,0.8,0.2,1], "B.G": [0.2,0.2,0.8,1], "Samples": [0.8,0.8,0.2,1] };
+  for (let i = 0; i < tabOptions.length; i++) {
+    const tab = tabOptions[i];
+    setNextFillColor(...tabColors[tab]); addBox(i * 100, ry - uiHeight + 10, 90, 20);
+    addStyle(); addText(tab, i * 100 + 6, ry - uiHeight + 25);
+
+    if (selectedTab === tab) {
+      setNextFillColor(...tabColors[tab]); addBox(0, ry - uiHeight + 30, rx, 50);
+      if (tab === "Tools") {
+        const toolButtonWidth = rx / tools.length;
+        for (let j = 0; j < tools.length; j++) {
+          const tool = tools[j];
+          setNextFillColor(...(tool === selectedTool ? [0.3,0.3,0.3,1] : [0.7,0.7,0.7,1]));
+          addBox(j * toolButtonWidth + 2, ry - uiHeight + 32, toolButtonWidth - 4, 20);
+          if (tool === selectedTool) {
+            setNextStrokeColor(1,0,0,1); setNextStrokeWidth(2);
+            addLine(j * toolButtonWidth, ry - uiHeight + 30, j * toolButtonWidth + toolButtonWidth, ry - uiHeight + 30);
+          }
+          addStyle(); setNextTextAlign(AlignH_Center);
+          addText(tool, j * toolButtonWidth + toolButtonWidth / 2, ry - uiHeight + 47);
+        }
+        const fillButtonY = ry - uiHeight + 57;
+        // Shape Fill toggle (slot 4)
+        setNextFillColor(...(fillMode ? [0.3,0.3,0.3,1] : [0.7,0.7,0.7,1]));
+        addBox(3 * toolButtonWidth + 2, fillButtonY, toolButtonWidth - 4, 20);
+        // unfilled circle + filled circle icons
+        setNextStrokeColor(0.3,0.3,0.3,1); setNextStrokeWidth(3); addCircle(3 * toolButtonWidth + 15, fillButtonY + 10, 6);
+        setNextFillColor(0.7,0.7,0.7,1); addCircle(3 * toolButtonWidth + (toolButtonWidth - 15), fillButtonY + 10, 6);
+        addStyle(); setNextTextAlign(AlignH_Center);
+        addText("Shape Fill", 3 * toolButtonWidth + toolButtonWidth / 2, fillButtonY + 15);
+        // Paintbucket toggle (slot 3)
+        setNextFillColor(...(paintbucket ? [0.3,0.3,0.3,1] : [0.7,0.7,0.7,1]));
+        addBox(2 * toolButtonWidth + 2, fillButtonY, toolButtonWidth - 4, 20);
+        addStyle(); setNextTextAlign(AlignH_Center);
+        addText("Paintbucket", 2 * toolButtonWidth + toolButtonWidth / 2, fillButtonY + 15);
+      }
+    }
+  }
+
+  // B.G sliders
+  if (selectedTab === "B.G") {
+    const squareSize = 35;
+    const squareY = ry - 110;
+    function drawSlider(x, y, w, h, value, label) {
+      setNextFillColor(0.7, 0.7, 0.7, 1); addBox(x, y, w, h);
+      const knobX = x + value * w;
+      setNextFillColor(0.3, 0.3, 0.3, 1); addBox(knobX - 5, y - 5, 10, h + 10);
+      setNextFillColor(0, 0, 0, 1); setNextTextAlign(AlignH_Center); addText(label, x + w / 2, y + h + 15);
+    }
+    function updateSlider(x, y, w, h, value) {
+      if (mouseHeld) {
+        const m = getCursor();
+        if (m.x >= x && m.x <= x + w && m.y >= y && m.y <= y + h) value = (m.x - x) / w;
+      }
+      return value;
+    }
+    const sliderWidth = 100, sliderHeight = 20, spacing = 20;
+    const sliderY = squareY + squareSize + 10;
+    const totalSliderWidth = 3 * sliderWidth + 2 * spacing;
+    let sliderX = rx / 2 - totalSliderWidth / 2;
+    bgColor.r = updateSlider(sliderX, sliderY, sliderWidth, sliderHeight, bgColor.r);
+    drawSlider(sliderX, sliderY, sliderWidth, sliderHeight, bgColor.r, "R");
+    sliderX += sliderWidth + spacing;
+    bgColor.g = updateSlider(sliderX, sliderY, sliderWidth, sliderHeight, bgColor.g);
+    drawSlider(sliderX, sliderY, sliderWidth, sliderHeight, bgColor.g, "G");
+    sliderX += sliderWidth + spacing;
+    bgColor.b = updateSlider(sliderX, sliderY, sliderWidth, sliderHeight, bgColor.b);
+    drawSlider(sliderX, sliderY, sliderWidth, sliderHeight, bgColor.b, "B");
+  }
+
+  // Samples buttons
+  if (selectedTab === "Samples") {
+    const presetButtonWidth = 80;
+    const labels = ["Image 1", "Image 2", "Image 3", "Image 4", "Image 5"];
+    for (let j = 0; j < labels.length; j++) {
+      const xPos = j * (presetButtonWidth + 10) + 10;
+      setNextFillColor(0.7, 0.7, 0.7, 1); addBox(xPos, ry - uiHeight + 40, presetButtonWidth, 20);
+      addStyle(); setNextTextAlign(AlignH_Center);
+      addText(labels[j], xPos + presetButtonWidth / 2, ry - uiHeight + 55);
+    }
+  }
+
+  // Canvas buttons
+  if (selectedTab === "Canvas") {
+    const flags = { undo: isUndoing, redo: isRedoing, save: isSaving, load: isLoading, reset: isResetting, chatsave: false, chatload: false };
+    const engagedLabel = { undo: "Undoing", redo: "Redoing", save: "Saved", load: "Loaded", reset: "Resetting", chatsave: "Sent", chatload: "Checking" };
+    const labels = ["Undo", "Redo", "Save", "Load", "Reset", "ChatSave", "ChatLoad"];
+    const xs = [10, 110, 210, 310, 410, 510, 610];
+    for (let i = 0; i < labels.length; i++) {
+      const key = labels[i].toLowerCase();
+      const engaged = flags[key];
+      setNextFillColor(...(engaged ? [0.3,0.3,0.3,1] : [0.7,0.7,0.7,1]));
+      addBox(xs[i], ry - 60, 90, 20);
+      addStyle(); setNextTextAlign(AlignH_Center);
+      const flash = engaged && now() - (key === "save" ? saveMessageTime : loadMessageTime) < 2;
+      addText(flash ? engagedLabel[key] : labels[i], xs[i] + 45, ry - 45);
+    }
+  }
+
+  drawRCostBar();
+  drawPreview();
+}
+
+// ----------------------------------------------------------------------------
+//  Input
+// ----------------------------------------------------------------------------
+let cursorX = -1, cursorY = -1;
+let mouseHeld = false;
+let mousePressed = false;   // edge: true for one update after mousedown
+function getCursor() { return { x: cursorX, y: cursorY }; }
+
+function toCanvasCoords(e) {
+  const rect = canvas.getBoundingClientRect();
+  return {
+    x: (e.clientX - rect.left) * (rx / rect.width),
+    y: (e.clientY - rect.top) * (ry / rect.height),
+  };
+}
+canvas.addEventListener("mousemove", e => { const p = toCanvasCoords(e); cursorX = p.x; cursorY = p.y; });
+canvas.addEventListener("mousedown", e => { const p = toCanvasCoords(e); cursorX = p.x; cursorY = p.y; mouseHeld = true; mousePressed = true; e.preventDefault(); });
+window.addEventListener("mouseup", () => { mouseHeld = false; strokeUndoSaved = false; });
+canvas.addEventListener("mouseleave", () => { cursorX = -1; cursorY = -1; });
+// touch support
+canvas.addEventListener("touchstart", e => { const t = e.touches[0]; const p = toCanvasCoords(t); cursorX = p.x; cursorY = p.y; mouseHeld = true; mousePressed = true; e.preventDefault(); }, { passive: false });
+canvas.addEventListener("touchmove", e => { const t = e.touches[0]; const p = toCanvasCoords(t); cursorX = p.x; cursorY = p.y; e.preventDefault(); }, { passive: false });
+window.addEventListener("touchend", () => { mouseHeld = false; strokeUndoSaved = false; });
+
+function handleMouse() {
+  const mX = cursorX, mY = cursorY;
+  const gridX = Math.floor(mX / cellSize) + 1;
+  const gridY = Math.floor(mY / cellSize) + 1;
+
+  // clicking into the UI band cancels an in-progress two-point shape
+  if (mY > ry - uiHeight && mousePressed) { startX = null; startY = null; firstClick = false; }
+
+  if (mY >= 0 && mY < ry - uiHeight && mX >= 0) {
+    // ---- drawing area ----
+    const twoPoint = (selectedTool === "Line" || selectedTool === "Circle" || selectedTool === "Rectangle") && !paintbucket;
+    if (paintbucket) {
+      // handled below
+    } else if (twoPoint) {
+      if (mousePressed) {
+        if (firstClick) { saveCurrentState(); placeElement(mX, mY); }
+        else { firstClick = true; startX = mX; startY = mY; }
+      }
+    } else if (selectedTool === "Pen" || selectedTool === "Paintbrush") {
+      if (mouseHeld) {
+        if (!strokeUndoSaved) { saveCurrentState(); strokeUndoSaved = true; }
+        placeElement(mX, mY);
+      }
+    }
+  } else if (mX >= 0 && mX <= 90 && mY >= ry - uiHeight && mY <= ry - uiHeight + 20) {
+    if (mousePressed) selectedTab = "Tools";
+  } else if (mX >= 100 && mX <= 190 && mY >= ry - uiHeight && mY <= ry - uiHeight + 20) {
+    if (mousePressed) selectedTab = "Canvas";
+  } else if (mX >= 200 && mX <= 290 && mY >= ry - uiHeight && mY <= ry - uiHeight + 20) {
+    if (mousePressed) selectedTab = "B.G";
+  } else if (mX >= 300 && mX <= 390 && mY >= ry - uiHeight && mY <= ry - uiHeight + 20) {
+    if (mousePressed) selectedTab = "Samples";
+  } else if (mY >= ry - 20) {
+    if (mousePressed) {
+      const bw = rx / elementNames.length;
+      const idx = Math.floor(mX / bw);
+      if (idx >= 0 && idx < elementNames.length) selectedElement = elements[elementNames[idx]];
+    }
+  } else if (selectedTab === "Tools") {
+    const toolButtonWidth = rx / tools.length;
+    const fillButtonY = ry - uiHeight + 57;
+    if (mousePressed) {
+      // toggle buttons
+      if (mY >= fillButtonY && mY <= fillButtonY + 20) {
+        if (mX >= 3 * toolButtonWidth + 2 && mX <= 4 * toolButtonWidth - 2) fillMode = !fillMode;
+        else if (mX >= 2 * toolButtonWidth + 2 && mX <= 3 * toolButtonWidth - 2) paintbucket = !paintbucket;
+      }
+      // tool selection row
+      if (mY >= ry - uiHeight + 32 && mY <= ry - uiHeight + 52) {
+        const idx = Math.floor(mX / toolButtonWidth);
+        if (idx >= 0 && idx < tools.length) selectedTool = tools[idx];
+      }
+    }
+  } else if (selectedTab === "Canvas") {
+    if (mY >= ry - 60 && mY <= ry - 40 && mousePressed) {
+      if (mX >= 10 && mX <= 100) { isUndoing = true; undo(); }
+      else if (mX >= 110 && mX <= 200) { isRedoing = true; redo(); }
+      else if (mX >= 210 && mX <= 300) { isSaving = true; saveMessageTime = now(); saveState(); }
+      else if (mX >= 310 && mX <= 400) { isLoading = true; loadMessageTime = now(); loadState(); }
+      else if (mX > 410 && mX <= 500) { isResetting = true; clearGrid(); }
+      else if (mX > 510 && mX <= 600) { openChatSave(); }
+      else if (mX > 610 && mX <= 700) { openChatLoad(); }
+    }
+  } else if (selectedTab === "Samples") {
+    const presetButtonWidth = 80, xOffset = 10, yOffset = ry - 60;
+    if (mY >= yOffset && mY <= yOffset + 20 && mousePressed) {
+      for (let j = 0; j < 5; j++) {
+        const x0 = xOffset + j * (presetButtonWidth + 10);
+        if (mX >= x0 && mX <= x0 + presetButtonWidth) { clearGrid(); loadMapFromText(SAMPLES["Image" + (j + 1)]); break; }
+      }
+    }
+  }
+
+  // paintbucket apply
+  if (paintbucket && gridX >= 1 && gridX <= gridWidth && gridY >= 1 && gridY <= gridHeight && mousePressed && mY < ry - uiHeight) {
+    const target = grid[gridY][gridX];
+    if (target && target.char !== selectedElement.char) {
+      saveCurrentState();
+      floodFill(mX, mY, target, selectedElement);
+      paintbucket = false;
+    }
+  }
+}
+
+// status flash decay
+function decayFlashes() {
+  const t = now();
+  if (isSaving && t - saveMessageTime > 2) isSaving = false;
+  if (isLoading && t - loadMessageTime > 2) isLoading = false;
+}
+
+// ----------------------------------------------------------------------------
+//  ChatSave / ChatLoad  (text export/import of levels)
+// ----------------------------------------------------------------------------
+const modal = document.getElementById("modal");
+const modalTitle = document.getElementById("modalTitle");
+const modalDesc = document.getElementById("modalDesc");
+const modalText = document.getElementById("modalText");
+const modalAction = document.getElementById("modalAction");
+document.getElementById("modalClose").onclick = () => { modal.style.display = "none"; };
+
+function openChatSave() {
+  modalTitle.textContent = "ChatSave — Level Code";
+  modalDesc.textContent = "This is your canvas as text. Copy it to save the level; paste it into ChatLoad later to restore.";
+  modalText.value = gridToText();
+  modalText.readOnly = false;
+  modalAction.textContent = "Copy to clipboard";
+  modalAction.onclick = () => { modalText.select(); try { navigator.clipboard.writeText(modalText.value); } catch (e) {} document.execCommand && document.execCommand("copy"); };
+  modal.style.display = "flex";
+}
+function openChatLoad() {
+  modalTitle.textContent = "ChatLoad — Paste Level Code";
+  modalDesc.textContent = "Paste a level code (from ChatSave) below and click Load.";
+  modalText.value = "";
+  modalText.readOnly = false;
+  modalAction.textContent = "Load";
+  modalAction.onclick = () => {
+    if (modalText.value.trim().length) { clearGrid(); saveCurrentState(); loadMapFromText(modalText.value); }
+    modal.style.display = "none";
+  };
+  modal.style.display = "flex";
+}
+
+// ----------------------------------------------------------------------------
+//  Main loop
+// ----------------------------------------------------------------------------
+function update() {
+  ctx.clearRect(0, 0, rx, ry);
+  elements.None.color = [bgColor.r, bgColor.g, bgColor.b, 1];
+
+  const t = now();
+  if (t - lastTime > 0.1) { moved = false; simulate(); lastTime = t; }
+
+  handleMouse();
+  drawGrid();
+  drawUI();
+  drawCursor(cursorX, cursorY);
+  decayFlashes();
+
+  mousePressed = false; // consume edge
+  requestAnimationFrame(update);
+}
+
+// ----------------------------------------------------------------------------
+//  Boot — start on sample 1, the original main.lua default
+// ----------------------------------------------------------------------------
+initGrid();
+loadMapFromText(SAMPLES.Image1);
+saveCurrentState();
+requestAnimationFrame(update);
+</script>
+</body>
+</html>
