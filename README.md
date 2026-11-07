@@ -2,6 +2,8 @@
 
 <h1>A sand simulator 'toy' for the MMO Dual Universe written in Lua.</h1>
 
+**▶ [Try the browser edition](https://chairpants.github.io/DUstToy/)**, no game needed.
+
 <h3>Instructions:</h3>
 Paste the main.lua directly into a screen. No programming board required.
 
